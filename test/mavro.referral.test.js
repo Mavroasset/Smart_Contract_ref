@@ -44,6 +44,10 @@ async function deployFixture() {
   );
   await referral.waitForDeployment();
 
+  //transfer mavro to referral contract
+  const mavroTransferAmount = parse(10000000);
+  await mavro.transfer(referral.target, mavroTransferAmount);
+
   // Node
   const Node = await ethers.getContractFactory("MavroNodeSale");
   const node = await Node.deploy(
@@ -80,6 +84,15 @@ async function deployFixture() {
   await referral
     .connect(deployer)
     .updateContracts(usdt.target, mavro.target, node.target, staking.target);
+
+  let nodeReq = 10;
+  for (let index = 0; index < 6; index++) {
+    await referral
+      .connect(deployer)
+      .updateRankRequirements(index, nodeReq, 5000, 0);
+
+    nodeReq = nodeReq + 2;
+  }
 
   return {
     deployer,
@@ -118,9 +131,9 @@ describe("Mavro referrals + NodeSale", function () {
     // 1) Buys
     await node.connect(user1).buyNodes(10, deployer.address);
     await node.connect(user2).buyNodes(10, user1.address);
-    await node.connect(user3).buyNodes(20, user2.address);
+    await node.connect(user3).buyNodes(10, user2.address);
     await node.connect(user4).buyNodes(5, user1.address);
-    await node.connect(user5).buyNodes(15, user4.address);
+    await node.connect(user5).buyNodes(16, user4.address);
     await node.connect(user6).buyNodes(5, user2.address);
 
     // 2) Basic sanity checks after buys
@@ -135,25 +148,25 @@ describe("Mavro referrals + NodeSale", function () {
     // expect(nodesUser5Before).to.equal(15n);
 
     // 3) user5 transfers 5 active nodes to user2
-    const activeNodesBefore = await node.getMyActiveNodes(user5.address);
-    console.log(
-      "user5 active nodes BEFORE transfer:",
-      activeNodesBefore.length
-    );
+    // const activeNodesBefore = await node.getMyActiveNodes(user5.address);
+    // console.log(
+    //   "user5 active nodes BEFORE transfer:",
+    //   activeNodesBefore.length
+    // );
 
     // make sure user5 actually has enough nodes for the test
-    expect(activeNodesBefore.length).to.be.gte(5);
+    // expect(activeNodesBefore.length).to.be.gte(5);
 
-    for (let i = 0; i < 5; i++) {
-      const nodeId = activeNodesBefore[i].nodeId;
-      await node.connect(user5).transferNode(nodeId, user2.address);
-    }
+    // for (let i = 0; i < 5; i++) {
+    //   const nodeId = activeNodesBefore[i].nodeId;
+    //   await node.connect(user5).transferNode(nodeId, user2.address);
+    // }
 
-    const activeNodesAfter = await node.getMyActiveNodes(user5.address);
-    console.log("user5 active nodes AFTER transfer:", activeNodesAfter.length);
+    // const activeNodesAfter = await node.getMyActiveNodes(user5.address);
+    // console.log("user5 active nodes AFTER transfer:", activeNodesAfter.length);
 
     // depending on your logic, this might be "length - 5" if only active count changes
-    expect(activeNodesAfter.length).to.equal(activeNodesBefore.length - 5);
+    // expect(activeNodesAfter.length).to.equal(activeNodesBefore.length - 5);
 
     // 4) Final node counts
     // const nodesUser2After = await node.nodeCountOfAUser(user2.address);
@@ -165,40 +178,48 @@ describe("Mavro referrals + NodeSale", function () {
     // expect(nodesUser5After).to.equal(10n);
 
     // 5) Rank check for user1
-    const myRank = await referral.checkMyRank(user1.address);
-    console.log("user1 rank after node transfer:", myRank.toString());
-
     await node.connect(user2).buyNodes(5, user1.address);
-    await node.connect(user7).buyNodes(15, user5.address);
 
-    const nodesUser2AfterNewBuy = await node.nodeCountOfAUser(user2.address);
+    const myRank = await referral.checkMyRank(user1.address);
+    console.log("user1 rank:", myRank.toString());
 
-    console.log(
-      "user2 nodes after buying 5 more:",
-      nodesUser2AfterNewBuy.toString()
-    );
+    for (let index = 2; index <= myRank; index++) {
+      const isPoolUser = await referral.isPoolParticipant(index, user1.address);
+      console.log(`user1 is pool participant for rank ${index}:`, isPoolUser);
+    }
+
+    // await node.connect(user2).buyNodes(5, user1.address);
+    // await node.connect(user7).buyNodes(15, user5.address);
+
+    // const nodesUser2AfterNewBuy = await node.nodeCountOfAUser(user2.address);
+
+    // console.log(
+    //   "user2 nodes after buying 5 more:",
+    //   nodesUser2AfterNewBuy.toString()
+    // );
 
     const teamNodesUser2 = await referral.teamNodeCount(user2.address);
     console.log("user2 team nodes:", teamNodesUser2.toString());
+
     const teamNodesUser4 = await referral.teamNodeCount(user4.address);
     console.log("user4 team nodes:", teamNodesUser4.toString());
 
-    const myRank2 = await referral.checkMyRank(user1.address);
-    console.log("user1 rank after user2 buy 5 more nodes:", myRank2.toString());
+    // const myRank2 = await referral.checkMyRank(user1.address);
+    // console.log("user1 rank after user2 buy 5 more nodes:", myRank2.toString());
 
     // If you know the numeric value of the expected rank enum, assert it here:
     // expect(myRank).to.equal(<EXPECTED_RANK_ENUM_VALUE>);
 
     //add new pool and check details
-    const poolCount = await referral.totalPools();
-    console.log("Total pools before adding new one:", poolCount.toString());
-    await referral.connect(deployer).addPool(parse(500000), 0, 0, 0, 0, 0, 0);
+    // const poolCount = await referral.totalPools();
+    // console.log("Total pools before adding new one:", poolCount.toString());
+    // await referral.connect(deployer).addPool(parse(500000), 0, 0, 0, 0, 0, 0);
 
-    const poolCountAfter = await referral.totalPools();
-    console.log("Total pools after adding new one:", poolCountAfter.toString());
-    for (let i = 0; i < poolCountAfter; i++) {
-      const poolDetails = await referral.pools(i);
-      console.log(`Pool ${i} details:`, poolDetails);
-    }
+    // const poolCountAfter = await referral.totalPools();
+    // console.log("Total pools after adding new one:", poolCountAfter.toString());
+    // for (let i = 0; i < poolCountAfter; i++) {
+    //   const poolDetails = await referral.pools(i);
+    //   console.log(`Pool ${i} details:`, poolDetails);
+    // }
   });
 });

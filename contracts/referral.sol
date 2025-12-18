@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./BokkyPooBahsDateTimeLibrary.sol";
 
 interface NodeSale {
@@ -16,13 +17,14 @@ interface NodeSale {
 }
 
 interface Staking {
-    function getUserTotalStakeAmount(address _user)
-        external
-        view
-        returns (uint256);
+    function getUserTotalStakeAmount(
+        address _user
+    ) external view returns (uint256);
 }
 
 contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     bytes32 public constant RECORDER_ROLE = keccak256("RECORDER_ROLE");
     bytes32 public constant SNAPSHOT_ROLE = keccak256("SNAPSHOT_ROLE");
 
@@ -41,11 +43,11 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
     address public stakingContract;
 
     uint256 public constant MAX_YEAR_FOR_REWARD = 7;
-    uint256 public FIRST_AND_2ND_YEAR_DAILY_REWARD = 2260000 * 10**18;
-    uint256 public THIRD_AND_4TH_YEAR_DAILY_REWARD = 1130000 * 10**18;
-    uint256 public FIFTH_YEAR_DAILY_REWARD = 753400 * 10**18;
-    uint256 public SIXTH_YEAR_DAILY_REWARD = 753400 * 10**18;
-    uint256 public SEVENTH_YEAR_DAILY_REWARD = 753400 * 10**18;
+    uint256 public FIRST_AND_2ND_YEAR_DAILY_REWARD = 2260000 * 10 ** 18;
+    uint256 public THIRD_AND_4TH_YEAR_DAILY_REWARD = 1130000 * 10 ** 18;
+    uint256 public FIFTH_YEAR_DAILY_REWARD = 753400 * 10 ** 18;
+    uint256 public SIXTH_YEAR_DAILY_REWARD = 753400 * 10 ** 18;
+    uint256 public SEVENTH_YEAR_DAILY_REWARD = 753400 * 10 ** 18;
 
     // level cash rewards
     uint256 public firstLevelCashReward = 700;
@@ -170,6 +172,12 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
     mapping(address => bool) public hasMigrated;
     mapping(address => bool) public isBlocked;
 
+    mapping(address => uint256) public nodesPurchased;
+    mapping(address => uint256) public totalDirectTeamNodes;
+    mapping(address => uint256) public maxDirectTeamNodes;
+    mapping(address => mapping(address => uint256)) public directLegTeamNodes;
+    mapping(uint256 => mapping(address => bool)) public isPoolParticipant;
+
     uint256 public programStartTime;
     bool public initialized;
 
@@ -243,6 +251,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         uint256 _amount
     ) external onlyRole(RECORDER_ROLE) {
         require(migrationRewardWindowClosed, "Currently Unavailable");
+
         UserInfo storage userInfo = users[user];
 
         if (userInfo.entryTime == 0 && referrals[user].referrer == address(0)) {
@@ -254,27 +263,37 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
 
         userInfo.nodesOwned += nodeCount;
 
-        //snapshot part
-        uint256 day = (block.timestamp - programStartTime) / reward_interval;
+        nodesPurchased[user] += nodeCount;
 
+        uint256 day = (block.timestamp - programStartTime) / reward_interval;
         dailySnapshots[day].totalNodes = totalNodesSold;
         nodesOwnedPerDay[user][day] = userInfo.nodesOwned;
 
-        if (lastNodeClaimedDay[user] == 0) {
-            lastNodeClaimedDay[user] = day;
-        }
-
+        if (lastNodeClaimedDay[user] == 0) lastNodeClaimedDay[user] = day;
         if (lastReferralClaimedDay[referrer] == 0 && referrer != address(0)) {
             lastReferralClaimedDay[referrer] = day;
         }
 
         address current = referrer;
+        address leg = user;
+
         while (current != address(0)) {
+            // total purchase-driven downline
             referrals[current].teamNodes += nodeCount;
+
+            // purchase-driven leg score (NOT affected by transfers)
+            uint256 newLeg = directLegTeamNodes[current][leg] + nodeCount;
+            directLegTeamNodes[current][leg] = newLeg;
+
+            totalDirectTeamNodes[current] += nodeCount;
+            if (newLeg > maxDirectTeamNodes[current]) {
+                maxDirectTeamNodes[current] = newLeg;
+            }
+
+            leg = current;
             current = referrals[current].referrer;
         }
 
-        // Update referral rewards for existing nodes
         _distributeCashReferralRewards(user, _amount, nodeCount);
 
         _updateRank(referrer);
@@ -314,6 +333,8 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
 
     function claimMyNodeRewards() external nonReentrant {
         require(block.timestamp >= programStartTime, "Not started yet");
+        _updateRank(msg.sender);
+
         uint256 today = (block.timestamp - programStartTime) / reward_interval;
         uint256 rewards;
         if (!migrationRewardWindowClosed) {
@@ -335,11 +356,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
                     msg.sender
                 ].nodesOwned;
             }
-            uint256 daysPassed = today - lastNodeClaimedDay[msg.sender];
-            require(
-                daysPassed * reward_interval >= reward_interval,
-                "Claim in 24 hours"
-            );
+            uint256 timePassed = block.timestamp -
+                lastNodeRewardClaimedTime[msg.sender];
+            require(timePassed >= reward_interval, "Claim in 24 hours");
             rewards = _calculateNodeRewards(msg.sender);
             require(rewards > 0, "No node rewards to claim");
             require(
@@ -354,9 +373,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
 
         totalNodeRewardClaimed += rewards;
         users[msg.sender].totalNodeRewardReceived += rewards;
-        rewardToken.transfer(msg.sender, rewards);
-
-        _updateRank(msg.sender);
+        rewardToken.safeTransfer(msg.sender, rewards);
 
         emit NodeRewardClaimed(msg.sender, rewards);
     }
@@ -425,7 +442,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         users[user].totalRefRewardReceived += rewards;
         totalReferralRewardClaimed += rewards;
 
-        rewardToken.transfer(user, rewards);
+        rewardToken.safeTransfer(user, rewards);
         _updateRank(user);
         emit ReferralRewardClaimed(user, rewards);
     }
@@ -452,10 +469,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
             "Insufficient Balance"
         );
 
-        require(
-            rewardToken.transfer(msg.sender, claimableReward),
-            "Transfer Failed"
-        );
+        rewardToken.safeTransfer(msg.sender, claimableReward);
     }
 
     function claimRankReward() external nonReentrant {
@@ -472,7 +486,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
 
         lastRankClaimedTime[msg.sender] = block.timestamp;
 
-        require(rewardToken.transfer(msg.sender, reward), "Transfer Failed");
+        rewardToken.safeTransfer(msg.sender, reward);
     }
 
     function _distributeCashReferralRewards(
@@ -513,7 +527,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
             ReferralInfo storage referrerInfo = referrals[currentReferrer];
 
             users[currentReferrer].totalCashReceived += amount;
-            cashRewardToken.transfer(currentReferrer, amount);
+            cashRewardToken.safeTransfer(currentReferrer, amount);
 
             emit ReferralRewardAdded(currentReferrer, user, level, amount);
 
@@ -521,11 +535,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         }
     }
 
-    function _calculateRankRewards(address _user)
-        internal
-        view
-        returns (uint256)
-    {
+    function _calculateRankRewards(
+        address _user
+    ) internal view returns (uint256) {
         if (isBlocked[_user]) return 0;
 
         Rank currentRank = checkMyRank(_user);
@@ -562,11 +574,10 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         return totalReward / BASE_DECIMALS;
     }
 
-    function _calculateCoFounderRewards(address user, uint256 _poolId)
-        internal
-        view
-        returns (uint256)
-    {
+    function _calculateCoFounderRewards(
+        address user,
+        uint256 _poolId
+    ) internal view returns (uint256) {
         if (isBlocked[user]) return 0;
         uint256 rewardRate = getPoolRewardRate(_poolId);
         uint256 claimableReward = ((rewardRate * BASE_DECIMALS) /
@@ -588,11 +599,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         return (claimableReward * timesPassed) / BASE_DECIMALS;
     }
 
-    function _calculateNodeRewards(address user)
-        private
-        view
-        returns (uint256)
-    {
+    function _calculateNodeRewards(
+        address user
+    ) private view returns (uint256) {
         UserInfo storage userInfo = users[user];
         if (userInfo.nodesOwned == 0 || programStartTime == 0) return 0;
         if (isBlocked[user]) return 0;
@@ -645,11 +654,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         return totalReward;
     }
 
-    function _calculateReferralRewards(address user)
-        private
-        view
-        returns (uint256)
-    {
+    function _calculateReferralRewards(
+        address user
+    ) private view returns (uint256) {
         if (programStartTime == 0) return 0;
         if (isBlocked[user]) return 0;
 
@@ -731,39 +738,32 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
 
     function _updateRank(address _user) internal {
         UserInfo storage userinfo = users[_user];
-        Rank currentRank = checkMyRank(_user);
 
-        if (currentRank >= Rank.AlphaAmbassador) {
-            address participant = _user;
+        Rank oldRank = userinfo.currentRank;
+        Rank newRank = checkMyRank(_user);
 
-            bool alreadyAdded = false;
-            address[] storage participants = pools[uint256(currentRank)]
-                .participants;
+        if (newRank <= oldRank) return;
 
-            for (uint256 i = 0; i < participants.length; i++) {
-                if (participants[i] == participant) {
-                    alreadyAdded = true;
-                    break;
-                }
-            }
+        uint256 start = uint256(oldRank) + 1;
+        uint256 minPool = uint256(Rank.AlphaAmbassador);
+        if (start < minPool) start = minPool;
 
-            if (!alreadyAdded) {
-                participants.push(participant);
+        for (uint256 rr = start; rr <= uint256(newRank); rr++) {
+            if (!isPoolParticipant[rr][_user]) {
+                isPoolParticipant[rr][_user] = true;
+                pools[rr].participants.push(_user);
             }
 
             if (
-                participants.length >=
-                usersRequiredForRankReward[uint256(currentRank)] &&
-                pools[uint256(currentRank)].rewardStartTime == 0
+                pools[rr].participants.length >=
+                usersRequiredForRankReward[rr] &&
+                pools[rr].rewardStartTime == 0
             ) {
-                pools[uint256(currentRank)].rewardStartTime = block.timestamp;
+                pools[rr].rewardStartTime = block.timestamp;
             }
         }
 
-        // ✅ Only update stored user rank if upgraded
-        if (currentRank > userinfo.currentRank) {
-            userinfo.currentRank = currentRank;
-        }
+        userinfo.currentRank = newRank;
     }
 
     function recordDailyReward() public onlyRole(SNAPSHOT_ROLE) {
@@ -802,9 +802,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         ReferralInfo storage refinfo = referrals[_user];
         Rank currentRank = userinfo.currentRank;
 
-        if (currentRank == Rank.Global) {
-            return currentRank;
-        }
+        if (currentRank == Rank.Global) return currentRank;
 
         for (
             uint256 r = uint256(currentRank) + 1;
@@ -822,34 +820,19 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
                 break;
             }
 
-            bool foundQualifiedDistribution = false;
             uint256 requiredFromOne = (rankRequirements[nextRank]
                 .nodeRequirement *
                 rankRequirements[nextRank].referralPercentage) / BASE_DIVIDER;
+
             uint256 requiredFromOthers = rankRequirements[nextRank]
                 .nodeRequirement - requiredFromOne;
 
-            uint256 allOtherTeamNodes;
-            for (uint256 i = 0; i < refinfo.directTeam.length; i++) {
-                address candidate = refinfo.directTeam[i];
-                // uint256 candidateNodes = referrals[candidate].teamNodes +
-                //     users[candidate].nodesOwned;
-
-                uint256 candidateNodes = referrals[candidate].teamNodes;
-
-                if (candidateNodes >= requiredFromOne) {
-                    if (foundQualifiedDistribution) {
-                        allOtherTeamNodes += candidateNodes;
-                    }
-                    foundQualifiedDistribution = true;
-                } else {
-                    allOtherTeamNodes += candidateNodes;
-                }
-            }
+            uint256 maxLeg = maxDirectTeamNodes[_user];
+            uint256 total = totalDirectTeamNodes[_user];
 
             if (
-                foundQualifiedDistribution &&
-                allOtherTeamNodes >= requiredFromOthers
+                maxLeg >= requiredFromOne &&
+                (total - maxLeg) >= requiredFromOthers
             ) {
                 currentRank = nextRank;
             } else {
@@ -860,11 +843,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         return currentRank;
     }
 
-    function getDirectTeamWithNodeCounts(address _user)
-        external
-        view
-        returns (TeamMemberWithNodes[] memory)
-    {
+    function getDirectTeamWithNodeCounts(
+        address _user
+    ) external view returns (TeamMemberWithNodes[] memory) {
         ReferralInfo storage userInfo = referrals[_user];
         uint256 teamSize = userInfo.directTeam.length;
 
@@ -949,11 +930,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         return referrals[_user].teamNodes;
     }
 
-    function myDirectTeam(address _user)
-        external
-        view
-        returns (address[] memory)
-    {
+    function myDirectTeam(
+        address _user
+    ) external view returns (address[] memory) {
         return referrals[_user].directTeam;
     }
 
@@ -961,43 +940,34 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         return referrals[user].directTeam.length;
     }
 
-    function getPendingNodeRewards(address user)
-        external
-        view
-        returns (uint256)
-    {
+    function getPendingNodeRewards(
+        address user
+    ) external view returns (uint256) {
         return _calculateNodeRewards(user);
     }
 
-    function getPendingReferralRewards(address referrer)
-        external
-        view
-        returns (uint256)
-    {
+    function getPendingReferralRewards(
+        address referrer
+    ) external view returns (uint256) {
         return _calculateReferralRewards(referrer);
     }
 
-    function getPendingRankRewards(address user)
-        external
-        view
-        returns (uint256)
-    {
+    function getPendingRankRewards(
+        address user
+    ) external view returns (uint256) {
         return _calculateRankRewards(user);
     }
 
-    function getPendingCoFounderRewards(address user, uint256 _poolId)
-        external
-        view
-        returns (uint256)
-    {
+    function getPendingCoFounderRewards(
+        address user,
+        uint256 _poolId
+    ) external view returns (uint256) {
         return _calculateCoFounderRewards(user, _poolId);
     }
 
-    function getEligibleRefRewardPercentage(address referrar)
-        public
-        view
-        returns (uint256)
-    {
+    function getEligibleRefRewardPercentage(
+        address referrar
+    ) public view returns (uint256) {
         address currentReferrer = referrar;
 
         uint256 totalRewardPercentage = 0;
@@ -1151,10 +1121,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         thirdLevelReward = _level3Rate;
     }
 
-    function updateUsersRequiredForRankRewards(uint256[6] calldata newRewards)
-        external
-        onlyOwner
-    {
+    function updateUsersRequiredForRankRewards(
+        uint256[6] calldata newRewards
+    ) external onlyOwner {
         usersRequiredForRankReward = newRewards;
     }
 
@@ -1162,10 +1131,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         time_interva_coFounder = _newTime;
     }
 
-    function updateNodeRequiredForLaunch(uint256 _newAmount)
-        external
-        onlyOwner
-    {
+    function updateNodeRequiredForLaunch(
+        uint256 _newAmount
+    ) external onlyOwner {
         require(_newAmount > 0, "can't be 0");
         nodeRequiredToLaunch = _newAmount;
     }
@@ -1196,7 +1164,7 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
             _amount <= IERC20(_token).balanceOf(address(this)),
             "Insufficient Contract Balance"
         );
-        IERC20(_token).transfer(msg.sender, _amount);
+        IERC20(_token).safeTransfer(msg.sender, _amount);
     }
 
     function updateYearlyReward(
@@ -1241,10 +1209,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         migrationDuration = _newDuration;
     }
 
-    function batchMigrateFullUserData(MigrationInput[] calldata data)
-        external
-        onlyOwner
-    {
+    function batchMigrateFullUserData(
+        MigrationInput[] calldata data
+    ) external onlyOwner {
         for (uint256 i = 0; i < data.length; i++) {
             address user = data[i].user;
             if (hasMigrated[user]) continue;
