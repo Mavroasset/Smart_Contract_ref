@@ -34,7 +34,7 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
     IERC20 public stakingToken;
 
     // Staking limits
-    uint256 public minStakeAmount = 5000 * (10**18); // Default minimum 5000 tokens (assuming 18 decimals)
+    uint256 public minStakeAmount = 5000 * (10 ** 18); // Default minimum 5000 tokens (assuming 18 decimals)
     uint256 public maxStakeAmount = type(uint256).max; // Unlimited by default
 
     uint256 public totalTokenStaked;
@@ -63,9 +63,10 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
     event TokensRecovered(address token, uint256 amount);
     event StakingLimitsUpdated(uint256 minAmount, uint256 maxAmount);
 
-    constructor(IERC20 _stakingToken, address _referralSystem)
-        Ownable(msg.sender)
-    {
+    constructor(
+        IERC20 _stakingToken,
+        address _referralSystem
+    ) Ownable(msg.sender) {
         require(address(_stakingToken) != address(0), "Invalid token");
         require(_referralSystem != address(0), "Invalid referral system");
         require(isContract(_referralSystem), "Referral must be contract");
@@ -73,20 +74,21 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         stakingToken = _stakingToken;
         referralSystem = MavroNewReferralsSystem(_referralSystem);
 
-        plans.push(Plan(180 days, 25, [3, 1, 1], false));
+        plans.push(Plan(90 days, 10, [1, 1, 1], false));
 
-        plans.push(Plan(365 days, 60, [7, 3, 1], false));
+        plans.push(Plan(180 days, 20, [3, 1, 1], false));
+
+        plans.push(Plan(365 days, 50, [7, 3, 1], false));
 
         plans.push(Plan(1095 days, 200, [10, 3, 1], false));
 
         plans.push(Plan(1825 days, 400, [15, 3, 1], false));
     }
 
-    function stake(uint256 _amount, uint8 _plan)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function stake(
+        uint256 _amount,
+        uint8 _plan
+    ) external nonReentrant whenNotPaused {
         require(_plan < plans.length, "Invalid plan");
         require(!plans[_plan].deprecated, "Plan deprecated");
         require(_amount >= minStakeAmount, "Amount below minimum stake limit");
@@ -215,11 +217,9 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
 
     //view functions
 
-    function getUserTotalStakeAmount(address _user)
-        public
-        view
-        returns (uint256)
-    {
+    function getUserTotalStakeAmount(
+        address _user
+    ) public view returns (uint256) {
         Stake[] storage _stakes = stakes[_user];
         uint256 totalAmount;
 
@@ -231,11 +231,9 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         return totalAmount;
     }
 
-    function claimableGenReward(address _user)
-        public
-        view
-        returns (uint256 totalReward)
-    {
+    function claimableGenReward(
+        address _user
+    ) public view returns (uint256 totalReward) {
         uint256 currentTime = block.timestamp;
         uint256 lastClaimed = lastGenRewardClaimedTime[_user];
 
@@ -272,11 +270,9 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    function claimableStakingReward(address _user)
-        public
-        view
-        returns (uint256)
-    {
+    function claimableStakingReward(
+        address _user
+    ) public view returns (uint256) {
         uint256 totalAmount;
         for (uint256 i = 0; i < stakes[_user].length; i++) {
             uint256 reward = _calculateClaimableReward(_user, i);
@@ -286,11 +282,9 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         return totalAmount;
     }
 
-    function getUserStakes(address _user)
-        external
-        view
-        returns (Stake[] memory)
-    {
+    function getUserStakes(
+        address _user
+    ) external view returns (Stake[] memory) {
         return stakes[_user];
     }
 
@@ -302,11 +296,10 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         return account.code.length > 0;
     }
 
-    function _calculateClaimableReward(address _user, uint256 _stakeIndex)
-        internal
-        view
-        returns (uint256)
-    {
+    function _calculateClaimableReward(
+        address _user,
+        uint256 _stakeIndex
+    ) internal view returns (uint256) {
         Stake memory userStake = stakes[_user][_stakeIndex];
 
         if (userStake.isUnstaked) return 0;
@@ -337,10 +330,10 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         _unpause();
     }
 
-    function setStakingLimits(uint256 _minAmount, uint256 _maxAmount)
-        external
-        onlyOwner
-    {
+    function setStakingLimits(
+        uint256 _minAmount,
+        uint256 _maxAmount
+    ) external onlyOwner {
         require(
             _minAmount <= _maxAmount,
             "Minimum cannot be greater than maximum"
@@ -383,10 +376,9 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    function updateGenRewards(uint256[3] calldata newRewards)
-        external
-        onlyOwner
-    {
+    function updateGenRewards(
+        uint256[3] calldata newRewards
+    ) external onlyOwner {
         require(
             newRewards[0] <= 100 &&
                 newRewards[1] <= 100 &&
@@ -411,10 +403,10 @@ contract MavroStaking is Ownable, ReentrancyGuard, Pausable {
         emit TokensRecovered(_token, _amount);
     }
 
-    function updateContracts(address _token, address _referal)
-        external
-        onlyOwner
-    {
+    function updateContracts(
+        address _token,
+        address _referal
+    ) external onlyOwner {
         require(
             _token != address(0) && _referal != address(0),
             "Invalid contract"

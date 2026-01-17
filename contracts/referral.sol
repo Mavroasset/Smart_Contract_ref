@@ -43,11 +43,11 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
     address public stakingContract;
 
     uint256 public constant MAX_YEAR_FOR_REWARD = 7;
-    uint256 public FIRST_AND_2ND_YEAR_DAILY_REWARD = 2260000 * 10 ** 18;
-    uint256 public THIRD_AND_4TH_YEAR_DAILY_REWARD = 1130000 * 10 ** 18;
-    uint256 public FIFTH_YEAR_DAILY_REWARD = 753400 * 10 ** 18;
-    uint256 public SIXTH_YEAR_DAILY_REWARD = 753400 * 10 ** 18;
-    uint256 public SEVENTH_YEAR_DAILY_REWARD = 753400 * 10 ** 18;
+    uint256 public FIRST_AND_2ND_YEAR_DAILY_REWARD = 1331669 * 10 ** 18;
+    uint256 public THIRD_AND_4TH_YEAR_DAILY_REWARD = 1130136 * 10 ** 18;
+    uint256 public FIFTH_YEAR_DAILY_REWARD = 1205479 * 10 ** 18;
+    uint256 public SIXTH_YEAR_DAILY_REWARD = 1205479 * 10 ** 18;
+    uint256 public SEVENTH_YEAR_DAILY_REWARD = 1205479 * 10 ** 18;
 
     // level cash rewards
     uint256 public firstLevelCashReward = 700;
@@ -80,12 +80,6 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
     uint256 public time_interva_coFounder = 180 days;
 
     uint256 public BASE_DECIMALS = 1e18;
-
-    uint256 public migrationTime;
-    uint256 public migrationDuration = 3 days;
-
-    uint256 public migrationCutoffDay;
-    bool public migrationRewardWindowClosed;
 
     struct TeamMemberWithNodes {
         string memberId;
@@ -138,6 +132,24 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         uint256 entryTime;
         uint256 totalCashReceived;
         Rank currentRank;
+        uint256 lastRefClaimedDay;
+        uint256 lastRefClaimedTime;
+        uint256 lastNodeClaimedDay;
+        uint256 lastNodeClaimedTime;
+        uint256 lastNodesOwnedPerDay;
+    }
+
+    struct coFounderMigrationInut {
+        address user;
+        uint256 cofounderEntry;
+        uint256 lastcofounderclaim;
+    }
+
+    struct nodePriceMigrateInput {
+        uint256 day;
+        uint256 totalNodes;
+        uint256 totalReward;
+        uint256 rewardPerNode;
     }
 
     struct DailySnapshot {
@@ -195,12 +207,15 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         address _rewardToken,
         address _cashrewardToken,
         uint256 _programStartTime,
+        uint256 _totalNodeRewardClaimed,
+        uint256 _totalRefRewardClaimed,
         uint256 totalNodes
     ) Ownable(msg.sender) {
         programStartTime = _programStartTime;
-        migrationTime = block.timestamp;
         initialized = true;
         totalNodesSold = totalNodes;
+        totalNodeRewardClaimed = _totalNodeRewardClaimed;
+        totalReferralRewardClaimed = _totalRefRewardClaimed;
         rewardToken = IERC20(_rewardToken);
         cashRewardToken = IERC20(_cashrewardToken);
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -208,21 +223,25 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         _grantRole(SNAPSHOT_ROLE, msg.sender);
 
         rankRequirements[Rank.Councilor] = RankRequirements(50, 5000, 0);
-        rankRequirements[Rank.AlphaAmbassador] = RankRequirements(100, 5000, 0);
+        rankRequirements[Rank.AlphaAmbassador] = RankRequirements(
+            100,
+            5000,
+            1000000 ether
+        );
         rankRequirements[Rank.Country] = RankRequirements(
             300,
             5000,
-            1000000 ether
+            2500000 ether
         );
         rankRequirements[Rank.Regional] = RankRequirements(
             600,
             5000,
-            2000000 ether
+            5000000 ether
         );
         rankRequirements[Rank.Global] = RankRequirements(
             1000,
             5000,
-            5000000 ether
+            10000000 ether
         );
 
         for (uint256 i = totalPools; i <= 6; i++) {
@@ -250,8 +269,6 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         address referrer,
         uint256 _amount
     ) external onlyRole(RECORDER_ROLE) {
-        require(migrationRewardWindowClosed, "Currently Unavailable");
-
         UserInfo storage userInfo = users[user];
 
         if (userInfo.entryTime == 0 && referrals[user].referrer == address(0)) {
@@ -306,8 +323,9 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         address to,
         uint256 nodeCount
     ) external onlyRole(RECORDER_ROLE) {
-        require(migrationRewardWindowClosed, "Currently Unavailable");
         require(users[from].nodesOwned >= nodeCount, "Not enough node");
+
+        require(!isBlocked[from] && !isBlocked[to], "Blocked! can't transfer");
 
         UserInfo storage receiverInfo = users[to];
 
@@ -326,7 +344,6 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
 
     function addCoFounder(address _user) external onlyRole(RECORDER_ROLE) {
         require(_user != address(0), "Invalid User");
-        require(migrationRewardWindowClosed, "Currently Unavailable");
         isCoFounder[_user] = true;
         coFounderEntryTime[_user] = block.timestamp;
     }
@@ -336,40 +353,23 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         _updateRank(msg.sender);
 
         uint256 today = (block.timestamp - programStartTime) / reward_interval;
-        uint256 rewards;
-        if (!migrationRewardWindowClosed) {
-            require(
-                block.timestamp <= migrationTime + migrationDuration,
-                "Claim window expired"
-            );
-            rewards = _calculateNodeRewards(msg.sender);
-            require(rewards > 0, "No rewards to claim");
 
-            lastNodeClaimedDay[msg.sender] = today;
-            lastNodeRewardClaimedTime[msg.sender] = block.timestamp;
-
-            nodesOwnedPerDay[msg.sender][today] = users[msg.sender].nodesOwned;
-        } else {
-            if (lastNodeClaimedDay[msg.sender] == 0) {
-                lastNodeClaimedDay[msg.sender] = migrationCutoffDay;
-                nodesOwnedPerDay[msg.sender][migrationCutoffDay] = users[
-                    msg.sender
-                ].nodesOwned;
-            }
-            uint256 timePassed = block.timestamp -
-                lastNodeRewardClaimedTime[msg.sender];
-            require(timePassed >= reward_interval, "Claim in 24 hours");
-            rewards = _calculateNodeRewards(msg.sender);
-            require(rewards > 0, "No node rewards to claim");
-            require(
-                rewards <= rewardToken.balanceOf(address(this)),
-                "Insufficient Contract Balance"
-            );
-
-            lastNodeClaimedDay[msg.sender] = today;
-            lastNodeRewardClaimedTime[msg.sender] = block.timestamp;
-            nodesOwnedPerDay[msg.sender][today] = users[msg.sender].nodesOwned;
+        uint256 timePassed = block.timestamp -
+            lastNodeRewardClaimedTime[msg.sender];
+        require(timePassed >= reward_interval, "Claim in 24 hours");
+        if (lastNodeClaimedDay[msg.sender] == 0) {
+            lastNodeClaimedDay[msg.sender] = 1;
         }
+        uint256 rewards = _calculateNodeRewards(msg.sender);
+        require(rewards > 0, "No node rewards to claim");
+        require(
+            rewards <= rewardToken.balanceOf(address(this)),
+            "Insufficient Contract Balance"
+        );
+
+        lastNodeClaimedDay[msg.sender] = today;
+        lastNodeRewardClaimedTime[msg.sender] = block.timestamp;
+        nodesOwnedPerDay[msg.sender][today] = users[msg.sender].nodesOwned;
 
         totalNodeRewardClaimed += rewards;
         users[msg.sender].totalNodeRewardReceived += rewards;
@@ -384,48 +384,22 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         address user = msg.sender;
         uint256 today = (block.timestamp - programStartTime) / reward_interval;
 
-        uint256 rewards;
+        // ✅ Enforce reward interval (e.g., once per 24h)
+        uint256 daysPassed = today - lastReferralClaimedDay[user];
+        require(
+            daysPassed * reward_interval >= reward_interval,
+            "Claim in 24 hours"
+        );
 
-        if (!migrationRewardWindowClosed) {
-            // ✅ Migration window still open (72h grace)
-            require(
-                block.timestamp <= migrationTime + migrationDuration,
-                "Claim window expired"
-            );
-
-            rewards = _calculateReferralRewards(user);
-            require(rewards > 0, "No rewards to claim");
-
-            lastReferralClaimedDay[user] = today;
-            lastReferralRewardClaimedTime[user] = block.timestamp;
-        } else {
-            // ✅ After 72h claim window
-
-            if (lastReferralClaimedDay[user] == 0) {
-                // ❗ User missed the window → start fresh from cutoff
-                lastReferralClaimedDay[user] = migrationCutoffDay;
-
-                // ⏪ Store node levels on cutoff day for fallback tracking
-                for (uint256 level = 1; level <= 3; level++) {
-                    dailyReferralNodesEachLevel[user][migrationCutoffDay][
-                        level
-                    ] = referrals[user].nodesEachLevel[level];
-                }
-            }
-
-            // ✅ Enforce reward interval (e.g., once per 24h)
-            uint256 daysPassed = today - lastReferralClaimedDay[user];
-            require(
-                daysPassed * reward_interval >= reward_interval,
-                "Claim in 24 hours"
-            );
-
-            rewards = _calculateReferralRewards(user);
-            require(rewards > 0, "No rewards to claim");
-
-            lastReferralClaimedDay[user] = today;
-            lastReferralRewardClaimedTime[user] = block.timestamp;
+        if (lastReferralClaimedDay[user] == 0) {
+            lastReferralClaimedDay[user] = 1;
         }
+
+        uint256 rewards = _calculateReferralRewards(user);
+        require(rewards > 0, "No rewards to claim");
+
+        lastReferralClaimedDay[user] = today;
+        lastReferralRewardClaimedTime[user] = block.timestamp;
 
         // ✅ Store today's referral snapshot for continuity
         for (uint256 level = 1; level <= 3; level++) {
@@ -607,48 +581,25 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         if (isBlocked[user]) return 0;
 
         uint256 today = (block.timestamp - programStartTime) / reward_interval;
-        uint256 fromDay;
+
         uint256 totalReward = 0;
 
-        if (
-            userInfo.entryTime < programStartTime &&
-            lastNodeClaimedDay[user] == 0 &&
-            block.timestamp > migrationTime &&
-            !migrationRewardWindowClosed
-        ) {
-            uint256 rewardPerDay = getCurrentRewardRate() / totalNodesSold;
-            uint256 daysPassed = (block.timestamp - programStartTime) /
-                reward_interval;
-            totalReward += daysPassed * rewardPerDay * userInfo.nodesOwned;
-        } else if (
-            userInfo.entryTime > programStartTime &&
-            userInfo.entryTime < migrationTime &&
-            block.timestamp > migrationTime &&
-            !migrationRewardWindowClosed &&
-            lastNodeClaimedDay[user] == 0
-        ) {
-            uint256 rewardPerDay = getCurrentRewardRate() / totalNodesSold;
-            uint256 daysPassed = (block.timestamp - userInfo.entryTime) /
-                reward_interval;
-            totalReward += daysPassed * rewardPerDay * userInfo.nodesOwned;
-        } else {
-            fromDay = lastNodeClaimedDay[user];
-            uint256 toDay = today - 1;
+        uint256 fromDay = lastNodeClaimedDay[user];
+        uint256 toDay = today - 1;
 
-            uint256 lastKnownNodes = 0;
+        uint256 lastKnownNodes = 0;
 
-            for (uint256 d = fromDay; d <= toDay; d++) {
-                uint256 nodesToday = nodesOwnedPerDay[user][d];
+        for (uint256 d = fromDay; d <= toDay; d++) {
+            uint256 nodesToday = nodesOwnedPerDay[user][d];
 
-                if (nodesToday == 0 && d > 0) {
-                    nodesToday = lastKnownNodes;
-                } else {
-                    lastKnownNodes = nodesToday;
-                }
-
-                uint256 perNode = dailySnapshots[d].rewardPerNode;
-                totalReward += nodesToday * perNode;
+            if (nodesToday == 0 && d > 0) {
+                nodesToday = lastKnownNodes;
+            } else {
+                lastKnownNodes = nodesToday;
             }
+
+            uint256 perNode = dailySnapshots[d].rewardPerNode;
+            totalReward += nodesToday * perNode;
         }
 
         return totalReward;
@@ -682,43 +633,28 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
             thirdLevelReward
         ];
 
-        if (!migrationRewardWindowClosed && lastReferralClaimedDay[user] == 0) {
-            // ✅ Fallback to legacy logic
-            uint256 rewardRate = getCurrentRewardRate() / totalNodesSold;
+        for (uint256 d = fromDay; d <= toDay; d++) {
+            uint256 perNodeReward = dailySnapshots[d].rewardPerNode;
 
             for (uint256 level = 1; level <= 3; level++) {
-                uint256 nodeCount = refInfo.nodesEachLevel[level];
-                uint256 nodeRewards = nodeCount * rewardRate * today;
+                uint256 nodeCount = dailyReferralNodesEachLevel[user][d][level];
+
+                // Fallback if node count not recorded
+                if (nodeCount == 0 && d > 0) {
+                    if (lastKnownNodes[level] == 0) {
+                        lastKnownNodes[level] = referrals[user].nodesEachLevel[
+                            level
+                        ];
+                    }
+                    nodeCount = lastKnownNodes[level];
+                } else {
+                    lastKnownNodes[level] = nodeCount;
+                }
+
+                uint256 nodeRewards = nodeCount * perNodeReward;
                 uint256 refReward = (nodeRewards * levelRewardPercents[level]) /
                     BASE_DIVIDER;
                 totalRewards += refReward;
-            }
-        } else {
-            // ✅ Post-migration logic using per-day tracking
-            for (uint256 d = fromDay; d <= toDay; d++) {
-                uint256 perNodeReward = dailySnapshots[d].rewardPerNode;
-
-                for (uint256 level = 1; level <= 3; level++) {
-                    uint256 nodeCount = dailyReferralNodesEachLevel[user][d][
-                        level
-                    ];
-
-                    // Fallback if node count not recorded
-                    if (nodeCount == 0 && d > 0) {
-                        if (lastKnownNodes[level] == 0) {
-                            lastKnownNodes[level] = referrals[user]
-                                .nodesEachLevel[level];
-                        }
-                        nodeCount = lastKnownNodes[level];
-                    } else {
-                        lastKnownNodes[level] = nodeCount;
-                    }
-
-                    uint256 nodeRewards = nodeCount * perNodeReward;
-                    uint256 refReward = (nodeRewards *
-                        levelRewardPercents[level]) / BASE_DIVIDER;
-                    totalRewards += refReward;
-                }
             }
         }
 
@@ -997,8 +933,14 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         return (block.timestamp - programStartTime) / reward_interval;
     }
 
-    function poolUsers(uint256 _poolId) public view returns (uint256) {
+    function totalPoolUsers(uint256 _poolId) public view returns (uint256) {
         return pools[_poolId].participants.length;
+    }
+
+    function getPoolUsers(
+        uint256 _poolId
+    ) public view returns (address[] memory) {
+        return pools[_poolId].participants;
     }
 
     //Admin functions
@@ -1066,6 +1008,14 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
     function updateClaimDay(uint256 _newDay) external onlyOwner {
         require(_newDay > 0, "Invalid Date");
         claimDay = _newDay;
+    }
+
+    function getToday() external view returns (uint256) {
+        (, , uint256 day) = BokkyPooBahsDateTimeLibrary.timestampToDate(
+            block.timestamp
+        );
+
+        return day;
     }
 
     function updateTimeInterval(uint256 _newTime) external onlyOwner {
@@ -1190,25 +1140,6 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
         SEVENTH_YEAR_DAILY_REWARD = _seventh;
     }
 
-    // migration
-    function finalizeMigration() external onlyOwner {
-        require(!migrationRewardWindowClosed, "Migration already finalized");
-        require(
-            block.timestamp > migrationTime + migrationDuration,
-            "Too early"
-        );
-        migrationRewardWindowClosed = true;
-        migrationCutoffDay =
-            (migrationTime + migrationDuration - programStartTime) /
-            reward_interval;
-    }
-
-    function updateMigrationDuration(uint256 _newDuration) external onlyOwner {
-        require(!migrationRewardWindowClosed, "Migration already finalized");
-        require(_newDuration > 0, "Invalid Duration");
-        migrationDuration = _newDuration;
-    }
-
     function batchMigrateFullUserData(
         MigrationInput[] calldata data
     ) external onlyOwner {
@@ -1229,7 +1160,46 @@ contract MavroNewReferralsSystem is Ownable, AccessControl, ReentrancyGuard {
             users[user].totalCashReceived = data[i].totalCashReceived;
             users[user].currentRank = data[i].currentRank;
 
+            lastReferralClaimedDay[user] = data[i].lastRefClaimedDay;
+            lastReferralRewardClaimedTime[user] = data[i].lastRefClaimedTime;
+            lastNodeClaimedDay[user] = data[i].lastNodeClaimedDay;
+            lastNodeRewardClaimedTime[user] = data[i].lastNodeClaimedTime;
+
+            nodesOwnedPerDay[user][data[i].lastNodeClaimedDay] = data[i]
+                .lastNodesOwnedPerDay;
+
+            uint256 minPool = uint256(Rank.AlphaAmbassador);
+
+            uint256 rank = uint256(data[i].currentRank);
+
+            if (rank >= minPool) {
+                isPoolParticipant[rank][user] = true;
+                pools[rank].participants.push(user);
+            }
+
             hasMigrated[user] = true;
+        }
+    }
+
+    function migrateCoFounders(
+        coFounderMigrationInut[] calldata data
+    ) external onlyOwner {
+        for (uint i = 0; i < data.length; i++) {
+            address user = data[i].user;
+            isCoFounder[user] = true;
+            coFounderEntryTime[user] = data[i].cofounderEntry;
+            lastCoFounderClaimedTime[user] = data[i].lastcofounderclaim;
+        }
+    }
+
+    function migratePricePerNode(
+        nodePriceMigrateInput[] calldata data
+    ) external onlyOwner {
+        for (uint i = 0; i < data.length; i++) {
+            uint256 day = data[i].day;
+            dailySnapshots[day].totalNodes = data[i].totalNodes;
+            dailySnapshots[day].totalReward = data[i].totalReward;
+            dailySnapshots[day].rewardPerNode = data[i].rewardPerNode;
         }
     }
 }

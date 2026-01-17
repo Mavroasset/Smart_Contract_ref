@@ -24,12 +24,16 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
 
     // programStartTime: set in past so "Not started yet" won't fail if you call claim
     const programStartTime = now - 10 * 24 * 60 * 60;
+    const totalNodeReardClaimed = 2000;
+    const totalRefRewardClaimed = 5000;
 
     const Mavro = await ethers.getContractFactory("MavroNewReferralsSystem");
     const mavro = await Mavro.deploy(
       await rewardToken.getAddress(),
       await cashToken.getAddress(),
       programStartTime,
+      totalNodeReardClaimed,
+      totalRefRewardClaimed,
       0 // totalNodesSold initial
     );
     await mavro.waitForDeployment();
@@ -65,7 +69,13 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
       await mavro.connect(owner).grantRole(RECORDER_ROLE, recorder.address)
     ).wait();
 
-    await (await mavro.connect(owner).updateClaimDay(15)).wait();
+    await (await mavro.connect(owner).updateClaimDay(18)).wait();
+
+    await (
+      await rewardToken
+        .connect(owner)
+        .transfer(await mavro.getAddress(), "1000000000000000000000000000")
+    ).wait();
 
     // make staking huge for everyone so stakingAmount checks never block tests
     // const huge = ethers.parseEther("1000000000");
@@ -85,9 +95,9 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
 
     // close migration window (recordReferral requires migrationRewardWindowClosed == true)
     // finalizeMigration requires time > migrationTime + migrationDuration (default 3 days)
-    await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60 + 5]);
-    await ethers.provider.send("evm_mine");
-    await (await mavro.connect(owner).finalizeMigration()).wait();
+    // await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60 + 5]);
+    // await ethers.provider.send("evm_mine");
+    // await (await mavro.connect(owner).finalizeMigration()).wait();
 
     // shrink rank requirements for faster edge testing (optional but makes tests deterministic)
     // keep referralPercentage same style as your contract (BASE_DIVIDER=10000)
@@ -99,6 +109,20 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
           .updateRankRequirements(rank, nodeReq, referralPct, stakeAmt)
       ).wait();
     };
+
+    //user required for rank reward start
+    await (
+      await mavro
+        .connect(owner)
+        .updateUsersRequiredForRankRewards([0, 0, 2, 10, 5, 3])
+    ).wait();
+
+    //update pool
+    await (
+      await mavro
+        .connect(owner)
+        .updatePool(2, 5000, 1000, 15000, 20000, 25000, 30000, 35000)
+    ).wait();
 
     // Rank enum: 0 Member, 1 Councilor, 2 Alpha, 3 Country, 4 Regional, 5 Global
     await setReq(1, 10, 5000, 0); // Councilor
@@ -373,9 +397,6 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
   it("E10: rank achieved before rewardStartTime → rank reward NOT claimable", async () => {
     const { mavro, buy, alice, bob, charlie } = await deployFixture();
 
-    const claimDay = await mavro.claimDay();
-    console.log("Claim day is:", claimDay);
-
     // Build structure
     await buy(bob, 0, alice);
     await buy(charlie, 0, alice);
@@ -394,6 +415,11 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
     expect(alphaPool.rewardStartTime).to.equal(0n);
 
     await advanceTime(24 * 60 * 60 + 10);
+
+    const claimDay = await mavro.claimDay();
+    const todaty = await mavro.getToday();
+    const isClaimDay = await mavro.isClaimDay();
+    console.log("Claim day is:", claimDay, todaty, isClaimDay);
 
     // Try to claim Alpha reward → should revert
     await expect(mavro.connect(alice).claimRankReward()).to.be.revertedWith(
@@ -423,30 +449,58 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
     const alphaPool = await mavro.pools(2);
     expect(alphaPool.rewardStartTime).to.not.equal(0n);
 
+    await advanceTime(24 * 60 * 60 + 10);
+
+    const claimDay = await mavro.claimDay();
+    const todaty = await mavro.getToday();
+    const isClaimDay = await mavro.isClaimDay();
+    console.log("Claim day is:", claimDay, todaty, isClaimDay);
+
+    const data = await mavro.getPoolRewardRate(2);
+
+    console.log("last claim", data);
+
     // Alice can now claim Alpha reward
     await expect(mavro.connect(alice).claimRankReward()).to.not.be.reverted;
   });
   it("E12: node reward uses nodesOwned (includes transfers)", async () => {
-    const { mavro, recorder, buy, alice, bob } = await deployFixture();
+    const { mavro, owner, recorder, buy, alice, bob } = await deployFixture();
 
     // Alice buys 10 nodes
     await buy(alice, 10, recorder);
 
     // Bob buys and transfers to Alice
     await buy(bob, 15, recorder);
-
     await mavro
       .connect(recorder)
-      .recordNodeTransfer(bob.address, alice.address, 5); // use your real transfer fn
+      .recordNodeTransfer(bob.address, alice.address, 5);
 
     const user = await mavro.users(alice.address);
     expect(user.nodesOwned).to.equal(15n);
 
-    // Node reward should be based on 15
+    // ✅ IMPORTANT: record snapshot for "current day"
+    await mavro.connect(owner).recordDailyReward();
+
+    // move 1 day
+    await advanceTime(24 * 60 * 60 + 10);
+
+    // ✅ record snapshot for "next day" too (so yesterday has rewardPerNode)
+    await mavro.connect(owner).recordDailyReward();
+
+    // move another day (so toDay=today-1 includes at least one snap with rewardPerNode)
+    await advanceTime(24 * 60 * 60 + 10);
+
+    // debug (optional)
+    const today = Number(await mavro.getDays());
+    const snapYesterday = await mavro.dailySnapshots(today - 1);
+    console.log("yesterday perNode:", snapYesterday.rewardPerNode.toString());
+
     await expect(mavro.connect(alice).claimMyNodeRewards()).to.not.be.reverted;
   });
+
   it("E13: transferring nodes does NOT upgrade rank", async () => {
-    const { mavro, buy, alice, bob, charlie } = await deployFixture();
+    const { mavro, buy, recorder, alice, bob, charlie, deep3 } =
+      await deployFixture();
 
     await buy(bob, 0, alice);
     await buy(charlie, 0, alice);
@@ -458,10 +512,24 @@ describe("MavroNewReferralsSystem — Edge-case tests", function () {
     expect((await mavro.users(alice.address)).currentRank).to.be.lessThan(2n);
 
     // Transfer nodes to Bob (attempt manipulation)
-    await buy(bob, 5, ethers.ZeroAddress);
-    await mavro.connect(bob).transferNodes(alice.address, 5);
+    await buy(bob, 5, deep3);
+    await mavro
+      .connect(recorder)
+      .recordNodeTransfer(bob.address, alice.address, 5);
 
     // Rank must NOT change
     expect((await mavro.users(alice.address)).currentRank).to.be.lessThan(2n);
+  });
+  it("E15: recordNodeTransfer reverts if FROM/TO is blocked", async () => {
+    const { mavro, owner, recorder, buy, alice, bob } = await deployFixture();
+
+    await buy(bob, 5, recorder);
+
+    // Block TO (alice)
+    await (await mavro.connect(owner).blockWallet(bob.address)).wait();
+
+    await expect(
+      mavro.connect(recorder).recordNodeTransfer(bob.address, alice.address, 1)
+    ).to.be.revertedWith("Blocked! can't transfer");
   });
 });
